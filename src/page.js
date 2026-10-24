@@ -2,8 +2,23 @@
 //
 // ── 为什么要有这个页 ──
 // 小满不该为了把灯调暗一点而必须先跟允朔说一句话。
-// 而且「灯现在到底是什么状态、守护今多走到哪了、谁动的」这些事
+// 而且「灯现在到底是什么状态、守护今夜走到哪了、谁动的」这些事
 // 看一眼比问一句快。
+//
+// ── 配色：和晨暮星一致，早晨两套 ──
+//
+// 第一版这里是深棕色（--bg: #14110f），打算靠晨暮星那边的转发层提 CSS 盖掉。
+// 那是错的：两边的变量名（--card、--ink、--muted）正好撞上，
+// 所以 var(--card, 淡色兜底) 里的兜底永远用不上——变量有值，只是它是深棕色。
+// 结果就是她看到的那一屏：整页深棕，和晨暮星完全不是一回事。
+//
+// 现在改成这边自己就是晨暮星的淡色调，不靠外面打补丁：
+//   白天：粉紫渐变底 + 奶白卡片 + 紫棕色字，强调色是玑紫 #7a3e5d
+//   夜里：深紫底 + 半透卡片 + 浅色字
+// 两套走 prefers-color-scheme，单独打开（3003 直连）时跟系统深浅色；
+// 从晨暮星转发进来时，FACE_CSS 挂在 html[data-face] 上、特指度更高，
+// 会把这里的颜色覆掉，跟着长沙的日出日落走——正是我要的：
+// 单独看也好看，嵌进晨暮星就和她那边一模一样。
 //
 // ── 安全 ──
 // 没设 LIGHT_BASIC_USER / PASS 就**整个页不开**，而不是开一个不要密码的控制页。
@@ -14,7 +29,7 @@ import { CONFIG, BRIGHTNESS_MIN, BRIGHTNESS_MAX, TEMP_MIN, TEMP_MAX } from './co
 import { lampStatus, lampPower, lampBrightness, lampTemp, ping } from './device.js';
 import { applyScene, SCENES } from './scenes.js';
 import { createSchedule, describeSchedule, repeatText, cancelSchedule, pendingSchedules } from './schedule.js';
-import { guardPlan } from './guard.js';
+import { guardPlan, decideTonight, skipTonight, resetTonight } from './guard.js';
 import { recentLogs } from './store.js';
 import { formatDateTime, formatTime, inWords } from './clock.js';
 
@@ -43,49 +58,86 @@ function basicAuth(req, res, next) {
   return res.status(401).send('要登录');
 }
 
+// 晨暮星的配色。变量名故意跟晨暮星对齐（--ink / --card / --muted / --rose 这些），
+// 这样从那边转发进来时它的 FACE_CSS 能直接接管，不必再写一层桥。
 const STYLE = `
 :root {
-  --bg: #14110f; --card: #1f1a17; --line: #342c27;
-  --text: #f2e9e1; --dim: #a8988c; --warm: #f0b458; --cool: #7fb2d6; --bad: #e07a5f;
+  --bg1: #efe7f4; --bg2: #f9f0ee; --bg3: #fdf8f2;
+  --ink: #2b2233; --muted: #665a70; --faint: #a597ab;
+  --card: rgba(255, 253, 251, 0.92);
+  --line: rgba(122, 62, 93, 0.14);
+  --rose: #9b4a7a; --rose-deep: #7a3e5d; --gold: #b7792f;
+  --cool: #4a7fa5; --bad: #c0506a;
+  --tint: rgba(122, 62, 93, 0.1);
+  --shadow: 0 10px 28px rgba(90, 50, 80, 0.12);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg1: #1a1626; --bg2: #221b2e; --bg3: #2a2033;
+    --ink: #f2e9e1; --muted: #a89bb0; --faint: #7d7088;
+    --card: rgba(255, 253, 251, 0.07);
+    --line: rgba(255, 255, 255, 0.13);
+    --rose: #d59bbd; --rose-deep: #e2a6c4; --gold: #f0b458;
+    --cool: #8fc0dd; --bad: #e8899b;
+    --tint: rgba(226, 166, 196, 0.14);
+    --shadow: 0 10px 28px rgba(0, 0, 0, 0.3);
+  }
 }
 * { box-sizing: border-box; }
 body {
   margin: 0; padding: 16px 14px 40px;
-  background: var(--bg); color: var(--text);
+  background: linear-gradient(180deg, var(--bg1) 0%, var(--bg2) 55%, var(--bg3) 100%) fixed;
+  color: var(--ink);
   font: 15px/1.6 -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", sans-serif;
   max-width: 560px; margin-inline: auto;
+  -webkit-font-smoothing: antialiased;
 }
-h1 { font-size: 19px; margin: 4px 0 16px; font-weight: 600; }
-h2 { font-size: 15px; margin: 0 0 10px; color: var(--warm); font-weight: 600; }
-.card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 14px; margin-bottom: 14px; }
+/* 标题：跟晨暮星那套走——苹方超细 + 大字距，不要粗黑居中那种死沉 */
+h1 {
+  font-weight: 200; font-size: 26px; letter-spacing: 0.36em; padding-left: 0.36em;
+  margin: 6px 0 18px; padding-right: 56px; color: var(--rose-deep);
+}
+h2 { font-size: 14px; margin: 0 0 12px; color: var(--rose); font-weight: 600; letter-spacing: 0.08em; }
+.card {
+  background: var(--card); border: 1px solid var(--line); border-radius: 16px;
+  padding: 15px; margin-bottom: 13px; box-shadow: var(--shadow);
+  backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+}
 .now { font-size: 17px; margin-bottom: 4px; }
-.dim { color: var(--dim); font-size: 13px; }
+.dim { color: var(--muted); font-size: 13px; }
 .bad { color: var(--bad); }
-.row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 11px; }
 button, .btn {
   appearance: none; cursor: pointer; font: inherit; font-size: 14px;
-  background: #2b2420; color: var(--text); border: 1px solid var(--line);
-  border-radius: 10px; padding: 9px 14px; min-height: 42px;
+  background: var(--card); color: var(--ink); border: 1px solid var(--line);
+  border-radius: 11px; padding: 9px 14px; min-height: 42px;
+  transition: background 0.15s ease, border-color 0.15s ease;
 }
-button:active { background: #3a302a; }
-button.on { border-color: var(--warm); color: var(--warm); }
-button.off { border-color: #4a3f39; color: var(--dim); }
+button:active { background: var(--tint); }
+button.on { border-color: var(--gold); color: var(--gold); }
+button.off { border-color: var(--line); color: var(--muted); }
+button.go { border-color: var(--rose); color: var(--rose); }
 button.wide { flex: 1; min-width: 92px; }
-label { display: block; font-size: 13px; color: var(--dim); margin: 12px 0 4px; }
-input[type=range] { width: 100%; height: 40px; accent-color: var(--warm); }
+label { display: block; font-size: 13px; color: var(--muted); margin: 12px 0 4px; }
+input[type=range] { width: 100%; height: 40px; accent-color: var(--rose); }
 input[type=text], input[type=number], select {
-  width: 100%; font: inherit; padding: 9px 10px; border-radius: 10px;
-  background: #2b2420; color: var(--text); border: 1px solid var(--line); min-height: 42px;
+  width: 100%; font: inherit; padding: 9px 10px; border-radius: 11px;
+  background: var(--card); color: var(--ink); border: 1px solid var(--line); min-height: 42px;
 }
+input::placeholder { color: var(--faint); }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
-td { padding: 6px 4px; border-bottom: 1px solid var(--line); vertical-align: top; }
-td.t { color: var(--dim); white-space: nowrap; width: 1%; }
-.stage { display: flex; justify-content: space-between; padding: 4px 0; font-size: 14px; }
-.stage.done { color: var(--dim); }
-.note { font-size: 12px; color: var(--dim); margin-top: 10px; line-height: 1.5; }
+td { padding: 7px 4px; border-bottom: 1px solid var(--line); vertical-align: top; }
+td.t { color: var(--muted); white-space: nowrap; width: 1%; }
+.stage { display: flex; justify-content: space-between; padding: 5px 0; font-size: 14px; }
+.stage.done { color: var(--muted); }
+.note { font-size: 12px; color: var(--muted); margin-top: 11px; line-height: 1.55; }
+.tag {
+  display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 999px;
+  background: var(--tint); color: var(--rose); margin-left: 6px;
+}
 form { margin: 0; }
-.flash { border-color: var(--warm); }
+.flash { border-color: var(--rose); }
 `;
 
 function renderStatus(st) {
@@ -100,8 +152,29 @@ function renderStatus(st) {
   );
 }
 
+// 睡前守护那张卡。三种状态：还没定 / 定了不守 / 定了几点开始。
 function renderGuard(plan) {
   if (!plan.enabled) return '<div class="dim">睡前守护关着。</div>';
+
+  if (!plan.decided) {
+    return (
+      `<div class="now">今夜还没定<span class="tag">等允朔</span></div>` +
+      `<div class="dim" style="margin-top:6px">` +
+      `${formatTime(plan.askAt)} 会叫允朔来定今夜从几点开始${plan.asked ? '（今夜已经叫过了）' : ''}。` +
+      `</div>` +
+      `<div class="note">他没定之前这东西一次都不动灯。你也可以自己在下面定一个。</div>` +
+      guardForm(plan)
+    );
+  }
+
+  if (plan.off) {
+    return (
+      `<div class="now">今夜不守护<span class="tag">允朔定的</span></div>` +
+      `${plan.note ? `<div class="dim" style="margin-top:6px">${esc(plan.note)}</div>` : ''}` +
+      guardForm(plan)
+    );
+  }
+
   const stages = plan.stages
     .map(
       (s) =>
@@ -111,13 +184,37 @@ function renderGuard(plan) {
     .join('');
   const next = plan.next
     ? `下一档：亮度 ${plan.next.target}，${formatTime(plan.next.at)}（${inWords(plan.next.at)}）`
-    : '今多的档已经走完了';
-  const delayed = plan.delays ? `· 因为她还在忙，推迟过 ${plan.delays} 次` : '';
+    : '今夜的档已经走完了';
+  const delayed = plan.delays ? `· 因为你还在忙，推迟过 ${plan.delays} 次` : '';
+
   return (
-    stages +
+    `<div class="now">今夜从 ${formatTime(plan.stages[0].at)} 开始<span class="tag">允朔定的</span></div>` +
+    `${plan.note ? `<div class="dim" style="margin-top:6px">${esc(plan.note)}</div>` : ''}` +
+    `<div style="margin-top:10px">${stages}</div>` +
     `<div class="dim" style="margin-top:8px">${esc(next)} ${esc(delayed)}</div>` +
     `<div class="note">最低到 ${plan.floor} 就停。守护从不关灯——关灯是你自己的动作。` +
-    `灯已经关着时守护什么都不做。</div>`
+    `灯已经关着时守护什么都不做。</div>` +
+    guardForm(plan)
+  );
+}
+
+// 你也能自己定 / 改 / 撒。允朔定的和你定的存在同一处，互相覆盖——
+// 不分两本账：那样两边说两种话的时候没人说得清到底几点开始。
+function guardForm(plan) {
+  return (
+    `<form method="post" action="/lamp/do" style="margin-top:12px">` +
+    `<input type="hidden" name="act" value="guard_set">` +
+    `<div class="grid2">` +
+    `<div><label>今夜从几点开始</label><input type="text" name="at" placeholder="23:40" required></div>` +
+    `<div><label>档位（可空）</label><input type="text" name="stages" placeholder="40,20,8"></div>` +
+    `</div>` +
+    `<div class="row"><button class="wide go" type="submit">${plan.decided ? '改成这个' : '定下来'}</button>` +
+    `</form>` +
+    `<form method="post" action="/lamp/do" style="flex:1"><input type="hidden" name="act" value="guard_skip">` +
+    `<button class="wide off" type="submit">今夜不守护</button></form>` +
+    `${plan.decided ? `<form method="post" action="/lamp/do" style="flex:1"><input type="hidden" name="act" value="guard_reset">` +
+      `<button class="wide" type="submit">撒掉，重新问他</button></form>` : ''}` +
+    `</div>`
   );
 }
 
@@ -167,7 +264,7 @@ function page({ st, plan, logs, pending, flash }) {
 <html lang="zh-CN"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="color-scheme" content="dark">
+<meta name="color-scheme" content="light dark">
 <title>${esc(CONFIG.lampName)}</title>
 <style>${STYLE}</style>
 </head><body>
@@ -326,6 +423,21 @@ export function registerPage(app) {
         case 'scene': {
           const r = await applyScene(b.scene, { source: 'page' });
           msg = r.ok ? r.message : r.error;
+          break;
+        }
+        case 'guard_set': {
+          const out = decideTonight({ at: b.at, stages: b.stages || null, note: '她在页面上定的' });
+          msg = out.error ? out.error : `今夜从 ${b.at} 开始，档位 ${out.plan.stages.join(' → ')}`;
+          break;
+        }
+        case 'guard_skip': {
+          skipTonight({ note: '她在页面上关的' });
+          msg = '今夜不守护了';
+          break;
+        }
+        case 'guard_reset': {
+          resetTonight();
+          msg = '今夜的安排撒了，下次会重新问允朔';
           break;
         }
         case 'schedule': {

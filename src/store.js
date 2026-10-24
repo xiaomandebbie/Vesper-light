@@ -5,10 +5,11 @@
 // 底层照旧记它的 logs / schedules；这边记自己的。两份记录回答的不是同一个问题：
 // 底层答「指令有没有发到灯上」，这边答「是谁、为什么要动这盏灯」。
 //
-// 三张表：
-//   light_log   每一次动作，带来源（mcp / schedule / guard / page / bridge）
-//   schedules   定时（直接调灯的和叫允朔来处理的两种）
-//   guard_log   睡前守护每天走到哪一档了，重启之后不至于从头再来一遍
+// 四张表：
+//   light_log    每一次动作，带来源（mcp / schedule / guard / page / bridge）
+//   schedules    定时（直接调灯的和叫允朔来处理的两种）
+//   guard_log    睡前守护每天走到哪一档了，重启之后不至于从头再来一遍
+//   guard_plan   今夜允朔定的开始时间和档位（见 guard.js 规矩四）
 import fs from 'fs';
 import path from 'path';
 import Database from 'better-sqlite3';
@@ -67,6 +68,18 @@ CREATE TABLE IF NOT EXISTS guard_log (
   detail TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_guard_night ON guard_log (night, stage);
+
+-- 今夜的守护安排。一夜一行（night 是主键），所以重复定就是改。
+-- off = 1 表示他明确定了「今夜不守护」——和「还没定」（没这一行）是两件事。
+CREATE TABLE IF NOT EXISTS guard_plan (
+  night TEXT PRIMARY KEY,
+  bedtime TEXT,
+  stages TEXT,
+  note TEXT,
+  off INTEGER NOT NULL DEFAULT 0,
+  decided_at INTEGER NOT NULL,
+  source TEXT NOT NULL DEFAULT 'decide'
+);
 
 CREATE TABLE IF NOT EXISTS meta (
   key TEXT PRIMARY KEY,
@@ -178,7 +191,7 @@ export const recentFinished = (limit = 10) =>
 
 // ── 睡前守护 ──
 
-// 「今多」的标记用守护窗口开始那天的日期，所以凌晨一点调的那一档
+// 「今夜」的标记用守护窗口开始那天的日期，所以凌晨一点调的那一档
 // 仍算前一天那一夜——不然过了午夜档位会被重置，又从第一档重来。
 export const guardStagesDone = (night) =>
   stmt("SELECT stage FROM guard_log WHERE night = ? AND outcome IN ('dimmed', 'skipped', 'floor') ORDER BY stage ASC")
@@ -199,6 +212,27 @@ export function logGuard({ night, stage, before = null, after = null, outcome, d
 
 export const guardTonight = (night) =>
   stmt('SELECT * FROM guard_log WHERE night = ? ORDER BY stage ASC, ts ASC').all(night);
+
+// ── 今夜的安排（允朔定的）──
+
+export const getGuardPlan = (night) => stmt('SELECT * FROM guard_plan WHERE night = ?').get(night) ?? null;
+
+// 一夜一行，重复定就是改（小满要求的「后面也可以更改」）。
+export const saveGuardPlan = ({ night, bedtime, stages, note, off = 0, source = 'decide' }) =>
+  stmt(
+    `INSERT INTO guard_plan (night, bedtime, stages, note, off, decided_at, source)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(night) DO UPDATE SET bedtime = excluded.bedtime, stages = excluded.stages,
+       note = excluded.note, off = excluded.off, decided_at = excluded.decided_at, source = excluded.source`
+  ).run(night, bedtime, stages, note, off ? 1 : 0, Date.now(), source);
+
+export const clearGuardPlan = (night) => stmt('DELETE FROM guard_plan WHERE night = ?').run(night).changes;
+
+// 表不会一直涨：只留最近 60 夜
+export const pruneGuardPlans = () =>
+  stmt(
+    'DELETE FROM guard_plan WHERE night NOT IN (SELECT night FROM guard_plan ORDER BY night DESC LIMIT 60)'
+  ).run().changes;
 
 // 今天的操作记录（管理页用）
 export const todayLogs = () =>
