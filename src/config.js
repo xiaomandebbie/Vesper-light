@@ -82,7 +82,10 @@ export const CONFIG = {
 
   // 睡前守护
   guard: on('LAMP_GUARD', true),
-  bedtime: parseHhMm(str('LAMP_BEDTIME'), { h: 23, m: 30 }),
+  // 几点叫允朔来定今夜的开始时间。他不定就不动灯（见 guard.js 规矩四）。
+  guardAskAt: parseHhMm(str('LAMP_GUARD_ASK_AT'), { h: 23, m: 0 }),
+  // 建议值：只用来在问他的时候做个参考，不再是硬指定的开始时间
+  bedtimeHint: parseHhMm(str('LAMP_BEDTIME'), { h: 23, m: 30 }),
   guardStages: stages('LAMP_GUARD_STAGES', [40, 20, 8]),
   guardStepMinutes: int('LAMP_GUARD_STEP_MINUTES', 15, { min: 1, max: 240 }),
   guardFloor: int('LAMP_GUARD_FLOOR', 5, { min: BRIGHTNESS_MIN, max: BRIGHTNESS_MAX }),
@@ -102,7 +105,6 @@ export const CONFIG = {
 };
 
 // 守护的档位里不该出现比地板还低的值，也不该有重复。
-// 地板本身永远是最后一档：到了它就停，不再往下，更不会关灯。
 CONFIG.guardStages = CONFIG.guardStages.filter((v) => v > CONFIG.guardFloor);
 if (!CONFIG.guardStages.length) CONFIG.guardStages = [CONFIG.guardFloor];
 
@@ -119,8 +121,8 @@ export function configSummary() {
   );
   lines.push(
     CONFIG.guard
-      ? `睡前守护：开着，${hhmm(CONFIG.bedtime)} 起每 ${CONFIG.guardStepMinutes} 分钟一档 ` +
-        `${CONFIG.guardStages.join(' → ')}，最低 ${CONFIG.guardFloor} 就停，` +
+      ? `睡前守护：开着。${hhmm(CONFIG.guardAskAt)} 叫允朔定今夜几点开始（他不定就不动灯），` +
+        `每 ${CONFIG.guardStepMinutes} 分钟一档 ${CONFIG.guardStages.join(' → ')}，最低 ${CONFIG.guardFloor} 就停，` +
         `${CONFIG.guardWarm ? `顺手调暖到 ${CONFIG.guardWarm}K，` : '不动色温，'}` +
         `窗口到 ${hhmm(CONFIG.guardWindowEnd)}，永不关灯`
       : '睡前守护：关闭'
@@ -131,7 +133,7 @@ export function configSummary() {
         `发消息${CONFIG.vesperNotify ? '开' : '关'}、` +
         `写对话记录${CONFIG.vesperConversationLog ? '开' : '关'}、` +
         `读时间感知${CONFIG.vesperReadDoing ? '开' : '关'}`
-      : '晨暮星：没接（守护只调灯，不说话；定时不能叫允朔来处理）'
+      : '晨暮星：没接（守护就永远定不了，也就不会动灯）'
   );
   lines.push(
     `定时：最多挂 ${CONFIG.maxPending} 个，错过超过 ${CONFIG.scheduleGraceMinutes} 分钟不补执行`
