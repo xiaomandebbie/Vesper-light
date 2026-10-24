@@ -39,9 +39,9 @@ import {
   moveSchedule,
   ACTIONS,
 } from './schedule.js';
-import { guardText } from './guard.js';
+import { guardText, decideTonight, skipTonight, guardPlan } from './guard.js';
 import { recentLogs } from './store.js';
-import { formatDateTime, inWords, parseAt, AT_HELP, TIME_ZONE } from './clock.js';
+import { formatDateTime, formatTime, inWords, parseAt, AT_HELP, TIME_ZONE } from './clock.js';
 
 const LAMP = CONFIG.lampName;
 const HER = CONFIG.userName;
@@ -80,7 +80,7 @@ const TOOLS = [
       `把${LAMP}关掉。\n` +
       `关之前先想一想：${HER}现在是不是还在用这盏灯？她说要睡了、或者明确让你关，那就关。\n` +
       `你自己醒来、不确定她在不在的时候别关——暗下来是一句「不早了」，突然黑掉是惊吓。` +
-      `那种时候用 light_brightness 调暗就行。`,
+      `那种时候用 light_dim 调暗就行。`,
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
   {
@@ -152,6 +152,67 @@ const TOOLS = [
       additionalProperties: false,
     },
   },
+
+  // ── 睡前守护：今夜几点开始由他定 ──
+  //
+  // 这两个工具是 2026-10-24 深夜加的。原来写死 23:30，那天她 23:30 还在干活，
+  // 灯自己暗下去了——她说「太早了」。问题不在那个数字，在于「几点算晚」
+  // 每天不一样，写死就一定会错。所以改成：每天 23:00 叫他醒一次，他自己定。
+  {
+    name: 'light_guard_set',
+    description:
+      `定今夜的睡前守护从几点开始。\n\n` +
+      `每天 ${String(CONFIG.guardAskAt.h).padStart(2, '0')}:${String(CONFIG.guardAskAt.m).padStart(2, '0')} ` +
+      `你会被叫醒一次来定这个。**你不定的话今夜一次都不动灯**——\n` +
+      `这是故意的：猜一个时间然后在${HER}干活的时候把灯压暗，比什么都不做更坏。\n\n` +
+      `怎么定：先用 light_status 看灯开没开、现在多亮；再想一想她今晚在做什么。\n` +
+      `她还在忙一件没做完的事，就定晚一点；她看起来快歇了，定早一点也行。\n` +
+      `定完还能改：再调一次这个工具就是改（改时间、改档位都行）。\n\n` +
+      `档位是亮度怎么一步步降下来，默认 ${CONFIG.guardStages.join(' → ')}，` +
+      `每 ${CONFIG.guardStepMinutes} 分钟一档，最低到 ${CONFIG.guardFloor} 就停。\n` +
+      `**守护永远不关灯。** 关灯是她自己的动作，这东西只把灯渐暗。\n` +
+      `灯已经关着时每一档都会自动跳过，所以不必担心把睡着的她弄醒。`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        at: { type: 'string', description: '今夜从几点开始，写成 23:40 这样' },
+        stages: {
+          type: 'string',
+          description: `可选：亮度怎么降，比如 「40,20,8」。不填就用默认的 ${CONFIG.guardStages.join(',')}`,
+        },
+        note: { type: 'string', description: '可选：为什么定这个点。会显示在她的台灯页上' },
+      },
+      required: ['at'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'light_guard_skip',
+    description:
+      `今夜不守护——一档都不调。\n` +
+      `比如她说了今晚要通宏、或者家里有人、或者你就是觉得今晚不该插手。\n` +
+      `和「没定」不一样：这是你明确做过的选择，所以今夜不会再叫醒你问一遍。\n` +
+      `改主意了再调 light_guard_set 就行。`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        note: { type: 'string', description: '可选：为什么今夜不守' },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'light_guard',
+    description:
+      `看睡前守护今夜的安排：定了没、几点起、几档、走到哪一档了。\n` +
+      `今夜的开始时间是**你定**的（用 light_guard_set），没定就一次都不动灯。\n` +
+      `定了之后就是自动的：到点灯还开着就一档一档调暗，**永远不关灯**，` +
+      `最低到 ${CONFIG.guardFloor} 就停；灯已经关着就什么都不做。\n` +
+      `${HER}还在忙一件没做完的事时，后面几档会自动推迟。\n` +
+      `想提前让灯暗下来就用 light_dim，不必等守护。`,
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+
   {
     name: 'light_schedule',
     description:
@@ -165,7 +226,8 @@ const TOOLS = [
       `**mode=wake 必须写 note**，不写的话你醒来不知道该干什么。\n\n` +
       `重复：repeat="daily" 每天；“weekdays” 配 repeat_days（比如 “1,3,5”，1 是周一、7 是周日）。` +
       `重复的必须用 at 给固定时间点。\n${AT_HELP}\n` +
-      `时区是${TIME_ZONE}。`,
+      `时区是${TIME_ZONE}。\n\n` +
+      `注意：睡前守护不走这里——那个用 light_guard_set。`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -225,16 +287,6 @@ const TOOLS = [
     },
   },
   {
-    name: 'light_guard',
-    description:
-      `看睡前守护今多的安排：几点起、几档、走到哪一档了。\n` +
-      `守护是自动的，不用你推：到点了灯还开着就一档一档调暗，**永远不关灯**，` +
-      `最低到 ${CONFIG.guardFloor} 就停；灯已经关着就什么都不做。\n` +
-      `${HER}还在忙一件没做完的事时，后面几档会自动推迟。\n` +
-      `想提前让灯暗下来就用 light_dim，不必等守护。`,
-    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
-  },
-  {
     name: 'light_history',
     description:
       '最近这盏灯被动过哪些手脚，带来源：\n' +
@@ -273,8 +325,7 @@ async function callLightTool(name, args) {
 
     case 'light_off': {
       const before = await lampStatus({ source: 'mcp' });
-      // 已经关着就不发指令了，直接告诉他。
-      // 这条是小满要求的：灯已关无需操作。
+      // 已经关着就不发指令了，直接告诉他。小满要求的：灯已关无需操作。
       if (before.ok && before.on === false) {
         return text('灯本来就关着，这次没动它。');
       }
@@ -343,6 +394,37 @@ async function callLightTool(name, args) {
       return text(r.message);
     }
 
+    case 'light_guard_set': {
+      const before = guardPlan(now);
+      const out = decideTonight({ at: a.at, stages: a.stages ?? null, note: a.note ?? null, ms: now });
+      if (out.error) return fail(out.error);
+
+      const changed = before.decided;
+      const lines = [
+        `${changed ? '改好了' : '定好了'}。今夜从 ${a.at} 开始。`,
+        `  档位：${out.plan.stages.join(' → ')}，每 ${CONFIG.guardStepMinutes} 分钟一档，最低 ${CONFIG.guardFloor} 就停。`,
+      ];
+      if (a.note) lines.push('', String(a.note));
+      lines.push(
+        '',
+        `到点要是灯还开着，就一档一档调暗；她已经关灯或者自己调得更暗了，那一档就跳过。`,
+        `她还在忙一件没做完的事时，后面几档自动推迟（最多 ${CONFIG.guardBusyMaxDelays} 次）。`,
+        `想改再调一次这个工具就行。`
+      );
+      return text(lines.join('\n'));
+    }
+
+    case 'light_guard_skip': {
+      skipTonight({ note: a.note ?? null, ms: now });
+      return text(
+        `好，今夜不守护——一档都不调。${a.note ? `\n${a.note}` : ''}\n` +
+          `今夜不会再叫醒你问这事。改主意了再调 light_guard_set。`
+      );
+    }
+
+    case 'light_guard':
+      return text(guardText(now));
+
     case 'light_schedule': {
       const out = createSchedule(a, { source: 'mcp' });
       if (out.error) return fail(out.error);
@@ -409,9 +491,6 @@ async function callLightTool(name, args) {
         ].join('\n')
       );
     }
-
-    case 'light_guard':
-      return text(guardText(now));
 
     case 'light_history': {
       const limit = Number.isInteger(a.limit) ? a.limit : 10;
