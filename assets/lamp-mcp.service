@@ -1,0 +1,43 @@
+# 底层米家服务的 systemd 单元（lamp_server.py，听 127.0.0.1:8890）。
+#
+# 为什么要它：那份交接文档第 8 节的第一条待办就是这个。
+# 没有开机自启，服务器一重启它不会自己起来，而 Vesper-light 和允朔那边
+# 所有动作都要经过它——于是灯整体失联，而日志里只是一句「连不上底层」。
+#
+# 装法见 scripts/install_lamp_service.sh（那个脚本会自己找路径、停掉裸跑的进程、装上再启动）。
+#
+# 几处故意的安排：
+#   Restart=always 加 RestartSec=10——小米云或网络抖一下它会自己挂，挂了就重来；
+#   间隔 10 秒是为了别在小米登录失效时狂重启刷接口。
+#   StartLimitBurst：五分钟内起超过 10 次就停下来——那种情况重启治不了（通常是
+#   auth_data.json 失效要重新扫码），循环重启只会把日志涂满。
+#   不写 User=root 是因为路径里有 ~，装脚本会把它展开成绝对路径并填上实际用户。
+#
+# 这个文件里的 __PLACEHOLDER__ 由安装脚本替掉，不要直接拷到 /etc/systemd 下。
+
+[Unit]
+Description=米家台灯 MCP（lamp_server.py）
+Documentation=https://github.com/xiaomandebbie/Vesper-light
+# 要联网才能跟小米云说话
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__WORKDIR__
+ExecStart=__PYTHON__ __SCRIPT__
+Restart=always
+RestartSec=10
+# 日志进 journald：journalctl -u lamp-mcp -f
+# 原来那份 ~/miot-lamp/server.log 是 nohup 时代的做法，以后不再长了
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=lamp-mcp
+# 缓存不刷在缓冲区里，出事时日志不会丢最后几行
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
